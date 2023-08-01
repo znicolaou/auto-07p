@@ -137,7 +137,7 @@ CONTAINS
     NFPR=AP%NFPR
     NPAR=AP%NPAR
 
-    ! allocate a minimum of NPARX so we can detect overflows 
+    ! allocate a minimum of NPARX so we can detect overflows
     ! past NPAR gracefully
     ALLOCATE(PAR(MAX(NPAR,NPARX)),THL(NFPR),THU(NDIM),IUZ(NUZR),VUZ(NUZR))
 
@@ -280,7 +280,31 @@ CONTAINS
              CALL PVLI(AP,ICP,UPS,NDIM,PAR,FNCI)
              IF(IID.GE.2)WRITE(9,*)
           ENDIF
-          DO ITEST=1,AP%NTEST
+          ! ZGN: Check for bifurcations first, before new call to FNCI on 301
+          DO ITEST=NUZR+1,AP%NTEST
+             ! Check for special points
+             CALL LCSPBV(AP,DSOLD,DSTEST,PAR,ICP,ITEST,FUNI,BCNI,ICNI,FNCI, &
+                  TEST(ITEST),RLCUR,RLOLD,RLDOT,NDIM,UPS,UOLDPS,UDOTPS, &
+                  UPOLDP,TM,DTM,P0,P1,EV,THL,THU,IUZ,VUZ,NITPS,ATYPE,STEPPED, &
+                  NTSTNA)
+             IF(STEPPED)ISTEPPED=ITEST
+             IF(LEN_TRIM(ATYPE)>0)THEN
+                IFOUND=ITEST
+                AP%ITP=LBITP(ATYPE,.TRUE.)
+                AP%ITP=AP%ITP+SIGN(10,AP%ITP)*ITPST
+             ENDIF
+          ENDDO
+
+          ! ZGN: Before checking UZRS, recalculate Floquet
+          IF(IAM==0)THEN
+             AP%IID=0 ! Disable repeated print
+             SP1 = FNCI(AP,ICP,UPS,NDIM,PAR,3,ATYPEDUM)
+             AP%IID=IID ! Restore IID
+             CALL PVLI(AP,ICP,UPS,NDIM,PAR,FNCI)
+             IF(IID.GE.2)WRITE(9,*)
+          ENDIF
+          ! ZGN: Now check UZR
+          DO ITEST=1,NUZR
              ! Check for special points
              CALL LCSPBV(AP,DSOLD,DSTEST,PAR,ICP,ITEST,FUNI,BCNI,ICNI,FNCI, &
                   TEST(ITEST),RLCUR,RLOLD,RLDOT,NDIM,UPS,UOLDPS,UDOTPS, &
@@ -974,7 +998,7 @@ CONTAINS
     USE SUPPORT
 
 ! Initialization for rotations
-    
+
     INTEGER, INTENT(IN) :: NDM, NTNC, NDIM
     DOUBLE PRECISION, INTENT(IN) :: UPS(NDIM,0:NTNC)
 
@@ -1021,7 +1045,7 @@ CONTAINS
 ! (Then the last row of the Jacobian will be zero)
 ! in case the starting direction is to be determined.
 
-    IAM=MPIIAM()    
+    IAM=MPIIAM()
     NTST=AP%NTST
     NCOL=AP%NCOL
     IID=AP%IID
@@ -1053,7 +1077,7 @@ CONTAINS
        DEALLOCATE(DUPS,DRL)
        RETURN
     ENDIF
-    
+
 ! Compute the starting direction.
 
     DO I=1,NFPR
@@ -1110,7 +1134,7 @@ CONTAINS
 
     IF(IID.GE.2)THEN
        WRITE(9,101)
-       DO I=1,NFPR 
+       DO I=1,NFPR
           WRITE(9,102)ICP(I),RLDOT(I)
        ENDDO
     ENDIF
@@ -1199,7 +1223,7 @@ CONTAINS
     RDS=0.d0
     NLLV=1
     IFST=1
-      
+
     CALL SOLVBV(IFST,AP,DET,PAR,ICP,FUNI,BCNI,ICNI,RDS,  &
          NLLV,RLCUR,RLOLD,RLDOT,NDIM,UPS,UOLDPS,UDOTPS,UPOLDP,DTM, &
          DUPS,DRL,P0,P1,THL,THU)
@@ -1264,7 +1288,7 @@ CONTAINS
 
     INTEGER I,IAM,IID,ITMX,IBR,NTOT,NTOP,NITSP1,ISTOP,NCOL,NFPR,NITPSS
     LOGICAL SEARCH
-    DOUBLE PRECISION DS,DSMAX,EPSS,Q0,Q1,DQ,RDS,RRDS,S0,S1
+    DOUBLE PRECISION DS,DSMAX,EPSS,Q0,Q1,DQ,RDS,RRDS,S0,S1,SP1
     DOUBLE PRECISION DETS,FLDFS,DSOLDS,DSTESTS
     CHARACTER(4) :: ATYPEDUM
 
@@ -1326,8 +1350,17 @@ CONTAINS
           RETURN
        ENDIF
 
+! ZGN: do not test UZ if Q0 or Q1 is large
+       WRITE(9,105)ATYPE,Q0,Q1
+       IF((ATYPE=='UZ') .AND. (ABS(Q0)>10 .OR. ABS(Q1)>10))THEN
+          CALL MPIBCAST1L(SEARCH)
+          ATYPE=''
+          Q=Q1
+          RETURN
+       ENDIF
+
 ! Use the secant method for the first step:
-       
+
        S0=0.d0
        S1=DSTEST
        DQ=Q0-Q1
@@ -1399,7 +1432,8 @@ CONTAINS
        ENDIF
 
 ! Check for zero.
-
+       !ZGN: Recalculate FLOWKM before PVLI
+       SP1 = FNCI(AP,ICP,UPS,NDIM,PAR,3,ATYPEDUM)
        CALL PVLI(AP,ICP,UPS,NDIM,PAR,FNCI)
        IF(IID.GE.2)WRITE(9,*)
        Q=FNCS(AP,ICP,UPS,PAR,ATYPE,IUZ,VUZ,ITEST,FNCI)
@@ -1416,6 +1450,8 @@ CONTAINS
 ! Return if tolerance has been met :
 
        RRDS=ABS(RDS)/(1+SQRT(ABS(DS*DSMAX)))
+       IF(IID>0)WRITE(9,104)RRDS,RDS
+
        IF(RRDS.LT.EPSS) THEN
           STEPPED=.TRUE.
           CALL MPIBCAST1L(STEPPED)
@@ -1459,6 +1495,10 @@ CONTAINS
 102 FORMAT(' ==> Location of special point : ', &
          ' Convergence.   Step size = ',ES13.5)
 103 FORMAT(I4,I6,' NOTE:Possible special point')
+104 FORMAT(' ==> Zack test : ', &
+         ' RDS = ',ES13.5,' RRDS = ',ES13.5)
+105 FORMAT(' ==> Zack test2 : ', &
+        ' ATYPE = ', A, ' Q1=', ES13.5, ' Q2=', ES13.5)
 
   END SUBROUTINE LCSPBV
 
@@ -1571,15 +1611,25 @@ CONTAINS
     ELSE
        IF(PAR(ICP(1)).LT.RL0.OR.PAR(ICP(1)).GT.RL1 &
             .OR. AMP.LT.A0.OR.AMP.GT.A1 .OR. NTOT.EQ.NMX)THEN
-          ITP=9+10*ITPST+1000
+          !ZGN: Only change ITP to EP if it isn't special...
+          IF(MOD(ITP,10).EQ.0 .OR. MOD(ITP,10).EQ.4) THEN
+             ITP=9+10*ITPST+1000
+          ENDIF
        ENDIF
        CALL MPIBCAST1I(ITP)
+
+       !ZGN: If we didnt change ITP but we should stop, set ISTOP
+       IF(PAR(ICP(1)).LT.RL0.OR.PAR(ICP(1)).GT.RL1 &
+            .OR. AMP.LT.A0.OR.AMP.GT.A1 .OR. NTOT.EQ.NMX)THEN
+              ISTOP=1
+       ENDIF
        ! to distinguish between EP for 1st point and EP for end point
        IF(ITP>1000)THEN
           ITP=ITP-1000
           ISTOP=1
        ENDIF
     ENDIF
+
     AP%ITP=ITP
 
 ! All special points receive label:
@@ -1648,7 +1698,7 @@ CONTAINS
 !  NPAR  : The dimension of the array PAR.
 !  NPARI : Number of internal parameters, at the end of the array PAR.
 !  NDIMU : The user-specified dimension.
-!  IPS   : The problem type. 
+!  IPS   : The problem type.
 !  IPRIV : Private field for use by toolboxes.
 !
 !  Following the above described identifying line there are NTPL lines
